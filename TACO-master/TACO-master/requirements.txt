@@ -1,10 +1,8 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
 pillow
 requests
-jupyter
 numpy
 pandas
-matplotlib
-seaborn
-graphviz
-Cython
-pycocotools
