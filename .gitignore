@@ -1,0 +1,30 @@
+
+# Secrets and environment files
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node.js
+node_modules/
+dist/
+
+# Local databases and user uploads
+*.db
+*.sqlite
+*.sqlite3
+uploads/*
+!uploads/.gitkeep
+
+# Python test/cache files
+.pytest_cache/
+.coverage
+
+# OS/editor files
+.DS_Store
+Thumbs.db
