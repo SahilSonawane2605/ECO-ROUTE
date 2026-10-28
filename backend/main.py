@@ -80,7 +80,7 @@ class StatusUpdateRequest(BaseModel):
     authority_notes: Optional[str] = None
 
 class VerificationRequest(BaseModel):
-    verified_by: str
+    verified_by: str = Field(min_length=2, max_length=150)
     authority_notes: Optional[str] = None
 
 # --- Auth Routes ---
@@ -199,13 +199,49 @@ def model_information():
 
 @app.get("/api/municipal/assets")
 def get_municipal_assets():
-    """Returns mapped Pune municipal drainage network references."""
+    """
+    Returns mapped Pune municipal drainage network references and spatial layer summaries.
+    Includes verified reference landmarks and genuine GIS layers from Pune Municipal Corporation data.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM municipal_assets")
     assets = [dict(row) for row in cursor.fetchall()]
+
+    # Fetch dataset metadata and summary counts from imported PMC GIS layers
+    cursor.execute("SELECT filename, layer_name, feature_count, geometry_type, bounds_json, imported_at FROM gis_datasets")
+    datasets = [dict(row) for row in cursor.fetchall()]
+
+    # Sample representative real GIS landmarks (rivers, nallas, primary SWD channels)
+    cursor.execute("""
+        SELECT id, layer_type, feature_name, geometry_type, min_lon, max_lon, min_lat, max_lat, source_dataset
+        FROM pune_spatial_features
+        WHERE layer_type = 'water_body'
+    """)
+    wb_samples = []
+    for r in cursor.fetchall():
+        center_lat = (r["min_lat"] + r["max_lat"]) / 2.0
+        center_lon = (r["min_lon"] + r["max_lon"]) / 2.0
+        wb_samples.append({
+            "id": r["id"],
+            "asset_type": "river",
+            "name": r["feature_name"] or "Pune Waterway",
+            "latitude": center_lat,
+            "longitude": center_lon,
+            "capacity_status": "normal",
+            "flow_direction_deg": 300.0,
+            "description": f"Verified water body polygon from {r['source_dataset']}"
+        })
+
+    # Combine landmarks
+    combined_assets = assets + wb_samples
     conn.close()
-    return {"assets": assets, "count": len(assets)}
+
+    return {
+        "assets": combined_assets,
+        "count": len(combined_assets),
+        "gis_datasets": datasets
+    }
 
 # --- Report Management Routes ---
 
@@ -215,12 +251,16 @@ def list_reports(
     status: Optional[str] = Query(None),
     risk_level: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query(None),
+    order: Optional[str] = Query("desc"),
+    limit: Optional[int] = Query(100),
+    offset: Optional[int] = Query(0),
     current_user: dict = Depends(get_current_user)
 ):
     """
     Role-isolated reports listing:
-    - Citizens see ONLY their own submitted reports.
-    - Municipal admins see all reports for authorized municipal triage.
+    - Citizens see ONLY their own submitted reports, ordered by submission date DESC by default.
+    - Municipal admins see all reports for authorized municipal triage, ordered by risk_score DESC by default.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -233,21 +273,46 @@ def list_reports(
         query += " AND citizen_id = ?"
         params.append(current_user["id"])
 
-    if report_type:
+    if report_type and report_type != "all":
         query += " AND report_type = ?"
         params.append(report_type)
-    if status:
+    if status and status != "all":
         query += " AND status = ?"
         params.append(status)
-    if risk_level:
+    if risk_level and risk_level != "all":
         query += " AND risk_level = ?"
         params.append(risk_level)
-    if search:
-        query += " AND (title LIKE ? OR description LIKE ? OR address LIKE ? OR ml_category LIKE ?)"
-        wildcard = f"%{search}%"
-        params.extend([wildcard, wildcard, wildcard, wildcard])
+    if search and search.strip():
+        query += " AND (title LIKE ? OR description LIKE ? OR address LIKE ? OR ml_category LIKE ? OR id LIKE ?)"
+        wildcard = f"%{search.strip()}%"
+        params.extend([wildcard, wildcard, wildcard, wildcard, wildcard])
 
-    query += " ORDER BY created_at DESC"
+    # Determine sort order
+    allowed_sorts = {
+        "risk_score": "risk_score",
+        "created_at": "created_at",
+        "updated_at": "updated_at",
+        "status": "status",
+        "drain_distance_m": "drain_distance_m"
+    }
+    direction = "ASC" if (order and order.lower() == "asc") else "DESC"
+    
+    if sort_by and sort_by in allowed_sorts:
+        sort_col = allowed_sorts[sort_by]
+    elif current_user["role"] == "municipal_admin":
+        # Municipal officers need actionable priority first (high risk score, then newest)
+        sort_col = "risk_score"
+    else:
+        sort_col = "created_at"
+
+    # Get total count before pagination
+    count_query = query.replace("SELECT *", "SELECT COUNT(*)")
+    cursor.execute(count_query, params)
+    total_count = cursor.fetchone()[0]
+
+    query += f" ORDER BY {sort_col} {direction}, created_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
     cursor.execute(query, params)
     rows = cursor.fetchall()
     conn.close()
@@ -255,7 +320,7 @@ def list_reports(
     reports = []
     for r in rows:
         item = dict(r)
-        for field in ["ml_all_predictions", "geo_evidence", "risk_factors"]:
+        for field in ["ml_all_predictions", "geo_evidence", "risk_factors", "plastic_obstruction_assessment", "waterlogging_assessment"]:
             if item.get(field):
                 try:
                     item[field] = json.loads(item[field])
@@ -263,7 +328,7 @@ def list_reports(
                     pass
         reports.append(item)
 
-    return {"reports": reports, "count": len(reports)}
+    return {"reports": reports, "count": len(reports), "total": total_count}
 
 @app.get("/api/reports/{report_id}")
 def get_report(report_id: str, current_user: dict = Depends(get_current_user)):
@@ -284,7 +349,7 @@ def get_report(report_id: str, current_user: dict = Depends(get_current_user)):
     if current_user["role"] == "citizen" and item["citizen_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Forbidden: You do not have permission to view this report.")
 
-    for field in ["ml_all_predictions", "geo_evidence", "risk_factors"]:
+    for field in ["ml_all_predictions", "geo_evidence", "risk_factors", "plastic_obstruction_assessment", "waterlogging_assessment"]:
         if item.get(field):
             try:
                 item[field] = json.loads(item[field])
@@ -364,6 +429,7 @@ async def create_report(
             ml_category, ml_confidence, ml_all_predictions, ml_extent_coverage, ml_status, model_version,
             drain_distance_m, waterway_distance_m, drainage_connectivity, elevation_risk, waterway_risk_flag, geo_evidence,
             risk_score, risk_level, risk_factors, confidence_score, recommended_action,
+            plastic_obstruction_assessment, waterlogging_assessment,
             status, is_synthetic, created_at, updated_at
         ) VALUES (
             ?, ?, ?, ?, ?, ?,
@@ -371,6 +437,7 @@ async def create_report(
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
+            ?, ?,
             'SUBMITTED', 0, ?, ?
         )
     """, (
@@ -379,6 +446,7 @@ async def create_report(
         ml_result["category"], ml_result["confidence"], json.dumps(ml_result["all_predictions"]), ml_result["extent_coverage"], ml_result["status"], MODEL_VERSION,
         geo_result["drain_distance_m"], geo_result["waterway_distance_m"], geo_result["drainage_connectivity"], geo_result["elevation_risk"], geo_result["waterway_risk_flag"], json.dumps(geo_result),
         risk_result["risk_score"], risk_result["risk_level"], json.dumps(risk_result["factors"]), risk_result["confidence_score"], risk_result["recommended_action"],
+        json.dumps(risk_result.get("plastic_obstruction_assessment")), json.dumps(risk_result.get("waterlogging_assessment")),
         now, now
     ))
 
@@ -502,32 +570,75 @@ def verify_cleanup(
     payload: VerificationRequest,
     admin_user: dict = Depends(require_municipal_admin)
 ):
-    """Municipal Supervisor Verification: Marks incident as VERIFIED and records digital signature."""
+    """
+    Municipal Supervisor Verification:
+    Strictly requires authenticated municipal administrator.
+    Validates that resolution photographic evidence has been uploaded before closing/verifying.
+    Persists verification timestamp, supervisor identity, notes, and records audit trail.
+    """
+    verifier_name = payload.verified_by.strip()
+    if not verifier_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Supervisor name and designation are required for verification sign-off."
+        )
+
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, status, cleanup_image_path FROM reports WHERE id = ?", (report_id,))
+    cursor.execute("SELECT * FROM reports WHERE id = ?", (report_id,))
     row = cursor.fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Incident report not found.")
 
+    # REQUIREMENT 7: Enforce that resolution photograph is required before verification
+    if not row["cleanup_image_path"] or not str(row["cleanup_image_path"]).strip():
+        conn.close()
+        raise HTTPException(
+            status_code=400,
+            detail="Resolution photograph evidence must be uploaded and saved before municipal verification."
+        )
+
     now = datetime.now(timezone.utc).isoformat()
+    verification_notes = payload.authority_notes.strip() if payload.authority_notes else "Site inspected. Conduits verified free of obstruction."
+
     cursor.execute("""
         UPDATE reports
-        SET cleanup_verified = 1, cleanup_verified_at = ?, cleanup_verified_by = ?,
-            status = 'VERIFIED', authority_notes = COALESCE(?, authority_notes), updated_at = ?
+        SET cleanup_verified = 1,
+            cleanup_verified_at = ?,
+            cleanup_verified_by = ?,
+            status = 'VERIFIED',
+            authority_notes = ?,
+            updated_at = ?
         WHERE id = ?
-    """, (now, payload.verified_by.strip(), payload.authority_notes, now, report_id))
+    """, (now, verifier_name, verification_notes, now, report_id))
 
+    audit_note = f"Verified & Closed by {verifier_name}. Notes: {verification_notes}"
     cursor.execute("""
         INSERT INTO status_history (report_id, from_status, to_status, changed_by_user_id, changed_by_name, notes, created_at)
         VALUES (?, ?, 'VERIFIED', ?, ?, ?, ?)
-    """, (report_id, row["status"], admin_user["id"], admin_user["full_name"], f"Verified by {payload.verified_by.strip()}", now))
+    """, (report_id, row["status"], admin_user["id"], admin_user["full_name"], audit_note, now))
 
     conn.commit()
+
+    # Re-fetch updated report to return full synchronized representation
+    cursor.execute("SELECT * FROM reports WHERE id = ?", (report_id,))
+    updated_row = cursor.fetchone()
     conn.close()
 
-    return {"success": True, "report_id": report_id, "status": "VERIFIED", "verified": True}
+    updated_report = dict(updated_row)
+    for field in ["ml_all_predictions", "geo_evidence", "risk_factors"]:
+        if updated_report.get(field):
+            try:
+                updated_report[field] = json.loads(updated_report[field])
+            except Exception:
+                pass
+
+    return {
+        "success": True,
+        "message": f"Incident {report_id} successfully verified and closed.",
+        "report": updated_report
+    }
 
 @app.get("/api/reports/{report_id}/history")
 def get_report_history(report_id: str, current_user: dict = Depends(get_current_user)):

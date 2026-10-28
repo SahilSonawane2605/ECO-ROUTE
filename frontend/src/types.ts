@@ -28,14 +28,44 @@ export interface RiskFactor {
   rationale: string;
 }
 
+export interface GisDatasetInfo {
+  filename: string;
+  layer_name: string;
+  feature_count: number;
+  geometry_type: string;
+  bounds_json: string;
+  imported_at: string;
+}
+
+export interface ObstructionAssessment {
+  score: number;
+  level: 'LOW' | 'MODERATE' | 'HIGH' | 'CRITICAL';
+  factors: RiskFactor[];
+  limitations: string[];
+  recommendation: string;
+  rationale?: string;
+}
+
+export interface WaterloggingAssessment {
+  score: number;
+  level: 'LOW' | 'MODERATE' | 'HIGH' | 'CRITICAL';
+  factors: RiskFactor[];
+  uncertainties: string[];
+  telemetry_gaps?: string[];
+  recommendation: string;
+  rationale?: string;
+}
+
 export interface GeoEvidence {
   drain_distance_m: number | null;
   waterway_distance_m: number | null;
-  closest_drain: MunicipalAsset | null;
-  closest_waterway: MunicipalAsset | null;
+  closest_drain?: any;
+  closest_waterway?: any;
+  closest_chamber?: any;
   drainage_connectivity: 'direct_adjacent' | 'nearby_overland' | 'unconnected_or_unknown';
   elevation_risk: string;
   waterway_risk_flag: boolean;
+  coverage_verified?: boolean;
   evidence: string[];
   uncertainties: string[];
 }
@@ -74,6 +104,8 @@ export interface ReportItem {
   risk_factors?: RiskFactor[];
   confidence_score: number;
   recommended_action: string;
+  plastic_obstruction_assessment?: ObstructionAssessment;
+  waterlogging_assessment?: WaterloggingAssessment;
 
   // Municipal Workflow
   status: 'SUBMITTED' | 'UNDER_REVIEW' | 'ASSIGNED' | 'IN_PROGRESS' | 'RESOLVED' | 'VERIFIED' | 'REJECTED';

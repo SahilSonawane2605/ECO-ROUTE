@@ -2,20 +2,18 @@ import { useState, useEffect } from 'react';
 import {
   Waves,
   Plus,
-  RefreshCw,
-  Search,
   Sparkles,
-  MapPin,
   Info,
   LogOut,
-  Shield,
-  FileText
+  Shield
 } from 'lucide-react';
 import type { ReportItem, MunicipalAsset, ModelMetrics, User } from './types';
 import { ReportMap } from './components/ReportMap';
 import { SubmitReportModal } from './components/SubmitReportModal';
 import { ReportDetailDrawer } from './components/ReportDetailDrawer';
 import { AuthModal } from './components/AuthModal';
+import { MunicipalPriorityQueue } from './components/MunicipalPriorityQueue';
+import { CitizenDashboard } from './components/CitizenDashboard';
 
 export function App() {
   // Auth state
@@ -40,6 +38,7 @@ export function App() {
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
   const [selectedRisk, setSelectedRisk] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [sortBy, setSortBy] = useState<'risk_score' | 'created_at' | 'status'>('created_at');
 
   // GIS toggles
   const [showDrains, setShowDrains] = useState(true);
@@ -65,8 +64,8 @@ export function App() {
     setReports([]);
   };
 
-  const fetchData = async () => {
-    setIsLoading(true);
+  const fetchData = async (isBackgroundPoll: boolean = false) => {
+    if (!isBackgroundPoll) setIsLoading(true);
     try {
       const headers: Record<string, string> = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -79,7 +78,15 @@ export function App() {
 
       if (repRes.ok) {
         const data = await repRes.json();
-        setReports(data.reports || []);
+        const incomingReports: ReportItem[] = data.reports || [];
+        setReports(incomingReports);
+
+        // Keep activeReport in sync if drawer is open
+        setActiveReport((prev) => {
+          if (!prev) return null;
+          const fresh = incomingReports.find((r) => r.id === prev.id);
+          return fresh || prev;
+        });
       } else if (repRes.status === 401) {
         handleLogout();
       }
@@ -93,15 +100,21 @@ export function App() {
         setModelMetrics(data);
       }
     } catch (err) {
-      console.error('Failed to load data:', err);
+      if (!isBackgroundPoll) console.error('Failed to load data:', err);
     } finally {
-      setIsLoading(false);
+      if (!isBackgroundPoll) setIsLoading(false);
     }
   };
 
   useEffect(() => {
     if (token) {
-      fetchData();
+      fetchData(false);
+      // Auto-refresh reports every 5 seconds so multi-tab or citizen sessions
+      // automatically receive municipal status changes and verification updates without requiring logout
+      const pollTimer = setInterval(() => {
+        fetchData(true);
+      }, 5000);
+      return () => clearInterval(pollTimer);
     } else {
       // Load public assets & metrics even if not logged in
       Promise.all([
@@ -112,21 +125,32 @@ export function App() {
   }, [token]);
 
   // Filter reports
-  const filteredReports = reports.filter((r) => {
-    if (selectedType !== 'all' && r.report_type !== selectedType) return false;
-    if (selectedStatus !== 'all' && r.status !== selectedStatus) return false;
-    if (selectedRisk !== 'all' && r.risk_level !== selectedRisk) return false;
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      const match =
-        r.title.toLowerCase().includes(q) ||
-        r.address.toLowerCase().includes(q) ||
-        r.ml_category.toLowerCase().includes(q) ||
-        r.id.toLowerCase().includes(q);
-      if (!match) return false;
-    }
-    return true;
-  });
+  const filteredReports = reports
+    .filter((r) => {
+      if (selectedType !== 'all' && r.report_type !== selectedType) return false;
+      if (selectedStatus !== 'all' && r.status !== selectedStatus) return false;
+      if (selectedRisk !== 'all' && r.risk_level !== selectedRisk) return false;
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase();
+        const match =
+          r.title.toLowerCase().includes(q) ||
+          r.address.toLowerCase().includes(q) ||
+          r.ml_category.toLowerCase().includes(q) ||
+          r.id.toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      if (sortBy === 'risk_score') {
+        return b.risk_score - a.risk_score;
+      }
+      if (sortBy === 'status') {
+        return a.status.localeCompare(b.status);
+      }
+      // default: created_at desc
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
 
   const isMunicipalAdmin = currentUser?.role === 'municipal_admin';
 
@@ -261,168 +285,33 @@ export function App() {
 
         {/* Authenticated Workspace */}
         {currentUser && activeTab === 'reports' && (
-          <div className="space-y-4">
-            {/* Filter and Status Bar */}
-            <div className="bg-white p-3.5 rounded-lg border border-slate-200 flex flex-wrap items-center justify-between gap-3 text-xs">
-              <div className="flex flex-wrap items-center gap-2.5">
-                <div className="relative">
-                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
-                  <input
-                    type="text"
-                    placeholder="Search by ID, address, or material..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="pl-8 pr-3 py-1.5 border border-slate-200 rounded-md w-56 text-xs focus:outline-none focus:border-slate-400"
-                  />
-                </div>
-
-                <select
-                  value={selectedType}
-                  onChange={(e) => setSelectedType(e.target.value)}
-                  className="px-2.5 py-1.5 border border-slate-200 rounded-md bg-white text-xs"
-                >
-                  <option value="all">All Incident Types</option>
-                  <option value="plastic_waste">Plastic Waste Reports</option>
-                  <option value="waterlogging">Active Waterlogging</option>
-                </select>
-
-                <select
-                  value={selectedStatus}
-                  onChange={(e) => setSelectedStatus(e.target.value)}
-                  className="px-2.5 py-1.5 border border-slate-200 rounded-md bg-white text-xs"
-                >
-                  <option value="all">All Statuses</option>
-                  <option value="SUBMITTED">SUBMITTED</option>
-                  <option value="UNDER_REVIEW">UNDER_REVIEW</option>
-                  <option value="ASSIGNED">ASSIGNED</option>
-                  <option value="IN_PROGRESS">IN_PROGRESS</option>
-                  <option value="RESOLVED">RESOLVED</option>
-                  <option value="VERIFIED">VERIFIED</option>
-                </select>
-
-                <select
-                  value={selectedRisk}
-                  onChange={(e) => setSelectedRisk(e.target.value)}
-                  className="px-2.5 py-1.5 border border-slate-200 rounded-md bg-white text-xs"
-                >
-                  <option value="all">All Risk Tiers</option>
-                  <option value="CRITICAL">CRITICAL (75-100)</option>
-                  <option value="HIGH">HIGH (50-74)</option>
-                  <option value="MODERATE">MODERATE (25-49)</option>
-                  <option value="LOW">LOW (&lt; 25)</option>
-                </select>
-              </div>
-
-              <button
-                onClick={fetchData}
-                className="px-2.5 py-1.5 border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-md flex items-center gap-1 font-medium"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-                <span>Refresh</span>
-              </button>
-            </div>
-
-            {/* Reports List */}
-            <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
-              <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between text-xs font-semibold text-slate-800 uppercase tracking-wider">
-                <span>
-                  {isMunicipalAdmin ? `Municipal Incident Triage Queue (${filteredReports.length})` : `My Submitted Incidents (${filteredReports.length})`}
-                </span>
-                <span className="font-normal text-slate-500 normal-case">
-                  {isMunicipalAdmin ? 'Showing all authorized reports' : 'Strictly isolated to your account'}
-                </span>
-              </div>
-
-              <div className="divide-y divide-slate-100">
-                {filteredReports.length === 0 ? (
-                  <div className="p-12 text-center space-y-3">
-                    <div className="w-10 h-10 bg-slate-100 text-slate-400 rounded-full flex items-center justify-center mx-auto">
-                      <FileText className="w-5 h-5" />
-                    </div>
-                    <div>
-                      <div className="font-semibold text-slate-700 text-xs">No Incident Reports Logged</div>
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        {isMunicipalAdmin 
-                          ? 'No reports currently match the active filter criteria.'
-                          : 'You have not submitted any incident reports yet. Click "Report Hazard" to submit your first report.'}
-                      </p>
-                    </div>
-                    {!isMunicipalAdmin && (
-                      <button
-                        onClick={() => setIsSubmitModalOpen(true)}
-                        className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-medium rounded-lg"
-                      >
-                        Submit Your First Report
-                      </button>
-                    )}
-                  </div>
-                ) : (
-                  filteredReports.map((rep) => {
-                    const isCritical = rep.risk_score >= 75;
-                    const isHigh = rep.risk_score >= 50 && rep.risk_score < 75;
-                    const isModerate = rep.risk_score >= 25 && rep.risk_score < 50;
-
-                    const riskColor = isCritical
-                      ? 'text-red-700 bg-red-50 border-red-200'
-                      : isHigh
-                      ? 'text-orange-700 bg-orange-50 border-orange-200'
-                      : isModerate
-                      ? 'text-amber-700 bg-amber-50 border-amber-200'
-                      : 'text-emerald-700 bg-emerald-50 border-emerald-200';
-
-                    return (
-                      <div
-                        key={rep.id}
-                        onClick={() => setActiveReport(rep)}
-                        className="p-4 hover:bg-slate-50 transition-colors cursor-pointer flex items-start justify-between gap-4"
-                      >
-                        <div className="flex items-start gap-4">
-                          <img
-                            src={rep.image_path}
-                            alt={rep.title}
-                            className="w-16 h-16 rounded object-cover border border-slate-200 shrink-0"
-                          />
-                          <div>
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="font-mono text-xs font-bold text-slate-900">{rep.id}</span>
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${riskColor}`}>
-                                {rep.risk_score} • {rep.risk_level}
-                              </span>
-                              <span className="px-2 py-0.5 rounded text-[10px] bg-slate-100 text-slate-700 font-medium">
-                                {rep.status}
-                              </span>
-                            </div>
-                            <h4 className="font-semibold text-slate-900 text-xs">{rep.title}</h4>
-                            <div className="text-[11px] text-slate-500 flex items-center gap-1 mt-0.5">
-                              <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
-                              <span>{rep.address}</span>
-                              <span className="text-slate-300">•</span>
-                              <span>{new Date(rep.created_at).toLocaleDateString()}</span>
-                            </div>
-                            <div className="text-[11px] text-slate-600 mt-1">
-                              Classified: <b>{rep.ml_category}</b> ({Math.round(rep.ml_confidence * 100)}%) • Extent: ~{rep.ml_extent_coverage}%
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="text-right shrink-0">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setActiveReport(rep);
-                            }}
-                            className="px-3 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-md"
-                          >
-                            View Details
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-          </div>
+          isMunicipalAdmin ? (
+            <MunicipalPriorityQueue
+              reports={filteredReports}
+              selectedReport={activeReport}
+              onSelectReport={(rep) => setActiveReport(rep)}
+              isLoading={isLoading}
+              onRefresh={() => fetchData(false)}
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              selectedStatus={selectedStatus}
+              onStatusChange={setSelectedStatus}
+              selectedRisk={selectedRisk}
+              onRiskChange={setSelectedRisk}
+              selectedType={selectedType}
+              onTypeChange={setSelectedType}
+              sortBy={sortBy}
+              onSortByChange={setSortBy}
+            />
+          ) : (
+            <CitizenDashboard
+              reports={filteredReports}
+              userName={currentUser.full_name}
+              onOpenReportModal={() => setIsSubmitModalOpen(true)}
+              onSelectReport={(rep) => setActiveReport(rep)}
+              onViewMap={() => setActiveTab('map')}
+            />
+          )
         )}
 
         {/* Hydraulic Map View */}

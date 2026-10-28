@@ -87,6 +87,10 @@ def init_db():
         cursor.execute("ALTER TABLE reports ADD COLUMN model_version TEXT DEFAULT 'mobilenetv3-realwaste-v1'")
     if "is_synthetic" not in columns:
         cursor.execute("ALTER TABLE reports ADD COLUMN is_synthetic BOOLEAN DEFAULT 0")
+    if "plastic_obstruction_assessment" not in columns:
+        cursor.execute("ALTER TABLE reports ADD COLUMN plastic_obstruction_assessment TEXT")
+    if "waterlogging_assessment" not in columns:
+        cursor.execute("ALTER TABLE reports ADD COLUMN waterlogging_assessment TEXT")
 
     # 3. Status History Table
     cursor.execute("""
